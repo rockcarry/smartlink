@@ -22,6 +22,7 @@ typedef struct {
     char      netdev[16];
     uint8_t   databuf[1 + MAX_DATA_UNIT_SIZE + 2]; // 1byte len + MAX_DATA_UNIT_SIZE + 2bytes checksum
     pthread_t pthread;
+    int       interval;
 } SMARTLINKTX;
 
 static uint32_t get_tick_count(void)
@@ -71,19 +72,19 @@ static void* smartlinktx_thread_proc(void *argv)
     while (!(tx->flags & TXFLAG_EXIT)) {
         if (!(tx->flags & TXFLAG_SEND)) { usleep(100*1000); continue; }
 
-        sendlen = ((idx * 2 + 1) << 4) | ((tx->databuf[idx] >> 0) & 0xF);
+        sendlen = ((idx * 2 + 0) << 4) | ((tx->databuf[idx] >> 0) & 0xF);
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
         printf("idx: %2d, broadcast sendlen0: %03X\n", idx, sendlen);
 
-        sendlen = ((idx * 2 + 2) << 4) | ((tx->databuf[idx] >> 4) & 0xF);
+        sendlen = ((idx * 2 + 1) << 4) | ((tx->databuf[idx] >> 4) & 0xF);
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
         printf("idx: %2d, broadcast sendlen1: %03X\n", idx, sendlen);
 
         datalen = 1 + tx->databuf[0] + 2;
         idx++; idx %= datalen;
-        usleep(100 * 1000);
+        usleep(tx->interval * 1000);
     }
 
     if (udpfd > 0) close(udpfd);
@@ -108,7 +109,7 @@ void smartlinktx_exit(void *ctx)
     free(tx);
 }
 
-void smartlinktx_send(void *ctx, uint8_t *buf, int len)
+void smartlinktx_send(void *ctx, uint8_t *buf, int len, int interval)
 {
     SMARTLINKTX *tx = (SMARTLINKTX*)ctx;
     if (!ctx) return;
@@ -118,7 +119,8 @@ void smartlinktx_send(void *ctx, uint8_t *buf, int len)
         tx->databuf[0] = (uint8_t)(len < MAX_DATA_UNIT_SIZE ? len : MAX_DATA_UNIT_SIZE);
         memcpy(tx->databuf + 1, buf, tx->databuf[0]);
         calculate_checksum(tx->databuf, tx->databuf[0] + 1, tx->databuf + tx->databuf[0] + 1, tx->databuf + tx->databuf[0] + 2);
-        tx->flags |= TXFLAG_SEND;
+        tx->interval = interval ? interval : 100;
+        tx->flags   |= TXFLAG_SEND;
         if (1) {
             int i;
             for (i=0; i<1+tx->databuf[0]+2; i++) printf("%02X ", tx->databuf[i]);
@@ -218,7 +220,7 @@ static void* smartlinkrx_thread_proc(void *argv)
         printf("\n");
 
         len = ret - skip - WIFI_80211_RAW_HDR_LEN;
-        idx =(len >> 4) - 1;
+        idx =(len >> 4);
         if (idx < 0) continue;
 
         item = get_item_by_mac(rx->macdatlist, MAX_MACDATITEM_NUM, buf + skip + 10);
@@ -320,20 +322,39 @@ int main(void)
     while (1) {
         char cmd[256], buf[256];
         scanf("%256s", cmd);
-        if (strcmp(cmd, "tx_send") == 0) {
-            scanf("%256s", buf);
+        if (strcmp(cmd, "send_start") == 0) {
+            int interval = 0;
+            scanf("%256s %d", buf, &interval);
             if (!tx) tx = smartlinktx_init("wlan0");
-            smartlinktx_send(tx, (uint8_t*)buf, strlen(buf) + 1);
-        } else if (strcmp(cmd, "tx_stop") == 0) {
-            smartlinktx_send(tx, NULL, 0);
-        } else if (strcmp(cmd, "rx_recv") == 0) {
+            smartlinktx_send(tx, (uint8_t*)buf, strlen(buf) + 1, interval);
+        } else if (strcmp(cmd, "send_stop") == 0) {
+            smartlinktx_send(tx, NULL, 0, 0);
+        } else if (strcmp(cmd, "recv_start") == 0) {
             int channel = 0, tmin = 0, tmax = 0; char strmac[256] = ""; uint8_t hexmac[6] = {};
             scanf("%d %s %d %d", &channel, strmac, &tmin, &tmax);
             strmac2hexmac(hexmac, strmac);
             if (!rx) rx = smartlinkrx_init("wlan0");
             smartlinkrx_recv(rx, channel, hexmac, tmin, tmax, rx_recv_callbck);
-        } else if (strcmp(cmd, "rx_stop") == 0) {
+        } else if (strcmp(cmd, "recv_stop") == 0) {
             smartlinkrx_recv(rx, 0, NULL, 0, 0, NULL);
+        } else if (strcmp(cmd, "help") == 0) {
+            printf("smartlink v1.0.0.0\n");
+            printf("available commmand:\n");
+            printf("- help: show this mesage.\n");
+            printf("- quit: quit this program.\n");
+            printf("- send_start str interval: start send data.\n");
+            printf("  - str is the data to send\n");
+            printf("  - interval controls the send speed by ms\n");
+            printf("    you can use 0 for default.\n");
+            printf("- send_stop: stop send data.\n");
+            printf("- recv_start channel mac locktime_min locktime_max: start recv data.\n");
+            printf("  - channel range: [0, 13], if using 1xx it will auto scan\n");
+            printf("  - mac: which mac we want to sniffe, if using null will sniffe all mac\n");
+            printf("  - locktime_min: the timeout checking for getting data on channel.\n");
+            printf("    you can use 0 for default.\n");
+            printf("  - locktime_max: the timeout checking after getting data on channel.\n");
+            printf("    you can use 0 for default.\n");
+            printf("- recv_stop: stop recv data.\n");
         } else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
             break;
         }
