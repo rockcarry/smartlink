@@ -14,7 +14,9 @@
 #include <netinet/in.h>
 #include "smartlink.h"
 
+#define CONFIG_SEND_HOSTADP_MODE 1
 #define MAX_DATA_UNIT_SIZE  39
+
 typedef struct {
     #define TXFLAG_EXIT  (1 << 0)
     #define TXFLAG_SEND  (1 << 1)
@@ -175,7 +177,11 @@ static int get_item_by_mac(MACDATITEM *list, int size, uint8_t *mac)
 
 static void* smartlinkrx_thread_proc(void *argv)
 {
-    #define WIFI_80211_RAW_HDR_LEN 0x4E
+#if CONFIG_SEND_HOSTADP_MODE
+    #define WIFI_80211_RAW_HDR_LEN (0x4E - 2)
+#else
+    #define WIFI_80211_RAW_HDR_LEN (0x4E - 0)
+#endif
     SMARTLINKRX *rx = (SMARTLINKRX*)argv;
     int      rawfd, ret, skip, len, idx, change, item, i;
     uint8_t  mask, code, checksum0, checksum1, *rxdat;
@@ -209,8 +215,13 @@ static void* smartlinkrx_thread_proc(void *argv)
         ret = recvfrom(rawfd, buf, sizeof(buf), 0, NULL, NULL);
         if (ret < 4) continue;
         skip = (buf[2] << 0) | (buf[3] << 8);
+#if CONFIG_SEND_HOSTADP_MODE
+        if (skip + WIFI_80211_RAW_HDR_LEN >= ret || buf[skip] != 0x08) continue;
+        if (memcmp(buf + skip + 4, s_mac_ff, sizeof(s_mac_ff)) != 0) continue; // if not broadcast
+#else
         if (skip + WIFI_80211_RAW_HDR_LEN >= ret || buf[skip] != 0x88) continue;
         if (memcmp(buf + skip + 10 + 6, s_mac_ff, sizeof(s_mac_ff)) != 0) continue; // if not broadcast
+#endif
         if (memcmp(rx->sniffe_mac, s_mac_00, sizeof(rx->sniffe_mac)) != 0 && memcmp(rx->sniffe_mac, buf + skip + 10 + 0, sizeof(rx->sniffe_mac)) != 0) continue;
 
         printf("%03X ", ret - skip - WIFI_80211_RAW_HDR_LEN);
