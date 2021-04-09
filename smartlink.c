@@ -6,13 +6,28 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include "smartlink.h"
+
+#ifdef WIN32
+#include <winsock2.h>
+#include <windows.h>
+#define socklen_t int
+#define get_tick_count GetTickCount
+#define usleep(t) Sleep((t) / 1000)
+#else
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include "smartlink.h"
+static uint32_t get_tick_count(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+#endif
 
 #define CONFIG_SEND_HOSTADP_MODE 1
 #define MAX_DATA_UNIT_SIZE  39
@@ -27,15 +42,15 @@ typedef struct {
     int       interval;
 } SMARTLINKTX;
 
-static uint32_t get_tick_count(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
-
 static int get_dev_ip(char *dev, struct in_addr *addr)
 {
+#ifdef WIN32
+    char name[MAXBYTE];
+    struct hostent *host = NULL;
+    gethostname(name, MAXBYTE);
+    host = gethostbyname(name);
+    if (host) addr->s_addr = host->h_addr_list[0] ? *(u_long*)host->h_addr_list[0] : 0;
+#else
     struct ifreq ifr = {};
     int          sock;
     strncpy(ifr.ifr_name, dev, sizeof(ifr.ifr_name));
@@ -44,6 +59,7 @@ static int get_dev_ip(char *dev, struct in_addr *addr)
     ioctl(sock, SIOCGIFADDR, &ifr);
     close(sock);
     *addr = ((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr;
+#endif
     return 0;
 }
 
@@ -63,13 +79,17 @@ static void* smartlinktx_thread_proc(void *argv)
     uint8_t buf[1472] = {0}; // udp max frame size is 1472
 
     udpfd = socket(AF_INET, SOCK_DGRAM, 0);
+#ifdef WIN32
+    opt = 1; ioctlsocket(udpfd, FIONBIO, (void*)&opt);
+#else
     fcntl(udpfd, F_SETFL, fcntl(udpfd, F_GETFL, 0) | O_NONBLOCK);  // setup non-block io mode
+#endif
 
     opt = 1; setsockopt(udpfd, SOL_SOCKET, SO_BROADCAST, (char*)&opt, sizeof(opt));
     get_dev_ip(tx->netdev, &dstaddr.sin_addr);
     dstaddr.sin_family       = AF_INET;
     dstaddr.sin_addr.s_addr |= 0xFF << 24;
-    printf("broadcast ip: %s\n", inet_ntoa(dstaddr.sin_addr));
+    printf("broadcast ip: %s\n", inet_ntoa(dstaddr.sin_addr)); fflush(stdout);
 
     while (!(tx->flags & TXFLAG_EXIT)) {
         if (!(tx->flags & TXFLAG_SEND)) { usleep(100*1000); continue; }
@@ -77,12 +97,12 @@ static void* smartlinktx_thread_proc(void *argv)
         sendlen = ((idx * 2 + 0) << 4) | ((tx->databuf[idx] >> 0) & 0xF);
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
-        printf("idx: %2d, broadcast sendlen0: %03X\n", idx, sendlen);
+        printf("idx: %2d, broadcast sendlen0: %03X\n", idx, sendlen); fflush(stdout);
 
         sendlen = ((idx * 2 + 1) << 4) | ((tx->databuf[idx] >> 4) & 0xF);
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
-        printf("idx: %2d, broadcast sendlen1: %03X\n", idx, sendlen);
+        printf("idx: %2d, broadcast sendlen1: %03X\n", idx, sendlen); fflush(stdout);
 
         datalen = 1 + tx->databuf[0] + 2;
         idx++; idx %= datalen;
@@ -95,8 +115,19 @@ static void* smartlinktx_thread_proc(void *argv)
 
 void* smartlinktx_init(char *dev)
 {
-    SMARTLINKTX *tx = calloc(1, sizeof(SMARTLINKTX));
+    SMARTLINKTX *tx = NULL;
+
+#ifdef WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("WSAStartup failed !\n"); fflush(stdout);
+        return NULL;
+    }
+#endif
+
+    tx = calloc(1, sizeof(SMARTLINKTX));
     if (!tx) return NULL;
+
     strncpy(tx->netdev, dev, sizeof(tx->netdev));
     pthread_create(&tx->pthread, NULL, smartlinktx_thread_proc, tx);
     return tx;
@@ -109,6 +140,9 @@ void smartlinktx_exit(void *ctx)
     tx->flags |= TXFLAG_EXIT;
     pthread_join(tx->pthread, NULL);
     free(tx);
+#ifdef WIN32
+    WSACleanup();
+#endif
 }
 
 void smartlinktx_send(void *ctx, uint8_t *buf, int len, int interval)
@@ -126,7 +160,7 @@ void smartlinktx_send(void *ctx, uint8_t *buf, int len, int interval)
         if (1) {
             int i;
             for (i=0; i<1+tx->databuf[0]+2; i++) printf("%02X ", tx->databuf[i]);
-            printf("\n");
+            printf("\n"); fflush(stdout);
         }
     }
 }
@@ -177,6 +211,7 @@ static int get_item_by_mac(MACDATITEM *list, int size, uint8_t *mac)
 
 static void* smartlinkrx_thread_proc(void *argv)
 {
+#ifndef WIN32
 #if CONFIG_SEND_HOSTADP_MODE
     #define WIFI_80211_RAW_HDR_LEN (0x4E - 2)
 #else
@@ -209,7 +244,7 @@ static void* smartlinkrx_thread_proc(void *argv)
             rx->sniffe_tick1 = get_tick_count() + rx->sniffe_tmax;
             if (++rx->sniffe_chnl == 14) rx->sniffe_chnl = 1;
             snprintf(cmd, sizeof(cmd), "iwconfig %s channel %d", rx->netdev, rx->sniffe_chnl); system(cmd);
-            printf("%s\n", cmd);
+            printf("%s\n", cmd); fflush(stdout);
         }
 
         ret = recvfrom(rawfd, buf, sizeof(buf), 0, NULL, NULL);
@@ -228,7 +263,7 @@ static void* smartlinkrx_thread_proc(void *argv)
         for (i=skip; i<ret&&i<76; i++) {
             printf("%02X ", buf[i]);
         }
-        printf("\n");
+        printf("\n"); fflush(stdout);
 
         len = ret - skip - WIFI_80211_RAW_HDR_LEN;
         idx =(len >> 4);
@@ -238,9 +273,9 @@ static void* smartlinkrx_thread_proc(void *argv)
         rxdat= rx->macdatlist[item].dat;
         rx->macdatlist[item].counter++;
 
-//      printf("+item: %d, counter: %d, diff: %d\n", item, rx->macdatlist[item].counter, (int32_t)get_tick_count() - (int32_t)rx->sniffe_tick0);
+//      printf("+item: %d, counter: %d, diff: %d\n", item, rx->macdatlist[item].counter, (int32_t)get_tick_count() - (int32_t)rx->sniffe_tick0); fflush(stdout);
         if (rx->macdatlist[item].counter > 2) rx->sniffe_tick0 = get_tick_count() + rx->sniffe_tmin;
-//      printf("-item: %d, counter: %d, diff: %d\n", item, rx->macdatlist[item].counter, (int32_t)get_tick_count() - (int32_t)rx->sniffe_tick0);
+//      printf("-item: %d, counter: %d, diff: %d\n", item, rx->macdatlist[item].counter, (int32_t)get_tick_count() - (int32_t)rx->sniffe_tick0); fflush(stdout);
 
         mask   =(idx & 0x1) ? 0xF0 : 0x0F;
         code   =(idx & 0x1) ? ((len & 0xF) << 4) : ((len & 0xF) << 0);
@@ -263,6 +298,7 @@ static void* smartlinkrx_thread_proc(void *argv)
     }
 
     if (rawfd > 0) close(rawfd);
+#endif
     return NULL;
 }
 
@@ -308,7 +344,7 @@ void smartlinkrx_recv(void *ctx, int channel, uint8_t *mac, int sniffetmin, int 
 #ifdef _TEST_
 static int rx_recv_callbck(int channel, uint8_t *mac, uint8_t *buf, int len)
 {
-    printf("channel: %d, mac: %02X%02X%02X%02X%02X%02X, data: %2d %s\n", channel, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], len, buf);
+    printf("channel: %d, mac: %02X%02X%02X%02X%02X%02X, data: %2d %s\n", channel, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], len, buf); fflush(stdout);
     return 1;
 }
 
@@ -324,7 +360,7 @@ static void strmac2hexmac(uint8_t hexmac[6], char *strmac)
         hexmac[i / 2] |= (i & 1) ? (val << 0) : (val << 4);
         strmac++; i++;
     }
-    printf("hexmac: %02X%02X%02X%02X%02X%02X\n", hexmac[0], hexmac[1], hexmac[2], hexmac[3], hexmac[4], hexmac[5]);
+    printf("hexmac: %02X%02X%02X%02X%02X%02X\n", hexmac[0], hexmac[1], hexmac[2], hexmac[3], hexmac[4], hexmac[5]); fflush(stdout);
 }
 
 int main(void)
@@ -366,6 +402,7 @@ int main(void)
             printf("  - locktime_max: the timeout checking after getting data on channel.\n");
             printf("    you can use 0 for default.\n");
             printf("- recv_stop: stop recv data.\n");
+            fflush(stdout);
         } else if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
             break;
         }
