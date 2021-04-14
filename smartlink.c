@@ -29,8 +29,8 @@ static uint32_t get_tick_count(void)
 }
 #endif
 
-#define CONFIG_SEND_HOSTADP_MODE 0
-#define MAX_DATA_UNIT_SIZE  39
+#define CONFIG_SEND_HOSTADP_MODE    0
+#define MAX_DATA_UNIT_SIZE          39
 
 typedef struct {
     #define TXFLAG_EXIT  (1 << 0)
@@ -94,12 +94,12 @@ static void* smartlinktx_thread_proc(void *argv)
     while (!(tx->flags & TXFLAG_EXIT)) {
         if (!(tx->flags & TXFLAG_SEND)) { usleep(100*1000); continue; }
 
-        sendlen = ((idx * 2 + 1) << 4) | ((tx->databuf[idx] >> 0) & 0xF);
+        sendlen = (((idx * 2 + 0) << 4) | ((tx->databuf[idx] >> 0) & 0xF)) + 1;
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
         printf("idx: %2d, broadcast sendlen0: %03X\n", idx, sendlen); fflush(stdout);
 
-        sendlen = ((idx * 2 + 2) << 4) | ((tx->databuf[idx] >> 4) & 0xF);
+        sendlen = (((idx * 2 + 1) << 4) | ((tx->databuf[idx] >> 4) & 0xF)) + 1;
         dstaddr.sin_port = 1 + rand() % 0xFFFE;
         sendto(udpfd, buf, sendlen, 0, (struct sockaddr*)&dstaddr, (socklen_t)sizeof(dstaddr));
         printf("idx: %2d, broadcast sendlen1: %03X\n", idx, sendlen); fflush(stdout);
@@ -265,8 +265,8 @@ static void* smartlinkrx_thread_proc(void *argv)
         }
         printf("\n"); fflush(stdout);
 
-        len = ret - skip - WIFI_80211_RAW_HDR_LEN;
-        idx =(len >> 4) - 1;
+        len = ret - skip - WIFI_80211_RAW_HDR_LEN - 1;
+        idx =(len >> 4);
         if (idx < 0) continue;
 
         item = get_item_by_mac(rx->macdatlist, MAX_MACDATITEM_NUM, buf + skip + 10);

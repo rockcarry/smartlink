@@ -5,7 +5,7 @@
 
 void* smartlinktx_init(char *dev);
 void  smartlinktx_exit(void *ctx);
-void  smartlinktx_send(void *ctx, uint8_t *buf, int len, int interval); // max send size is 42 bytes
+void  smartlinktx_send(void *ctx, uint8_t *buf, int len, int interval); // max send size is 39 bytes
 
 typedef int (*PFN_SMARTLINK_CALLBCK)(int channel, uint8_t *mac, uint8_t *buf, int len);
 void* smartlinkrx_init(char *dev);
